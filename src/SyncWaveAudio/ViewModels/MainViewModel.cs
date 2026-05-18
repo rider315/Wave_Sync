@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Text;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -43,6 +45,12 @@ public partial class MainViewModel : ObservableObject
 
     // Debug log panel
     [ObservableProperty] private bool isDebugPanelOpen = true;
+
+    // Log capture
+    [ObservableProperty] private bool isCapturing;
+    [ObservableProperty] private int captureCountdown;
+    private readonly List<SyncLogEntry> _captureBuffer = [];
+    private Timer? _captureTimer;
 
     public ObservableCollection<AudioDeviceInfo> Devices { get; } = [];
     public ObservableCollection<SyncLogEntry> DebugLogs { get; } = [];
@@ -291,6 +299,76 @@ public partial class MainViewModel : ObservableObject
         IsDebugPanelOpen = !IsDebugPanelOpen;
     }
 
+    [RelayCommand]
+    private void CaptureLogs()
+    {
+        if (IsCapturing) return;
+
+        IsCapturing = true;
+        CaptureCountdown = 10;
+        _captureBuffer.Clear();
+        AddLog(LogCategory.System, "📸 Log capture started — recording for 10 seconds...");
+
+        _captureTimer = new Timer(_ =>
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                CaptureCountdown--;
+                if (CaptureCountdown <= 0)
+                {
+                    _captureTimer?.Dispose();
+                    _captureTimer = null;
+                    SaveCapturedLogs();
+                    IsCapturing = false;
+                }
+            });
+        }, null, 1000, 1000);
+    }
+
+    private void SaveCapturedLogs()
+    {
+        try
+        {
+            var logsDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "SyncWave Audio", "logs");
+            Directory.CreateDirectory(logsDir);
+
+            var fileName = $"capture_{DateTime.Now:yyyyMMdd_HHmmss}.log";
+            var filePath = Path.Combine(logsDir, fileName);
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"=== SyncWave Audio Log Capture ===");
+            sb.AppendLine($"Captured at: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine($"Buffer size: {BufferSizeMs}ms");
+            sb.AppendLine($"Running: {IsRunning}");
+            sb.AppendLine($"Devices: {SelectedDeviceCount} selected, {SelectedRelayDeviceCount} relay");
+            sb.AppendLine($"Sync health: {SyncHealthPercent}% ({SyncHealthLabel})");
+            sb.AppendLine($"Max drift: {MaxDriftMs:F1}ms, Avg drift: {AvgDriftMs:F1}ms");
+            sb.AppendLine($"Entries: {_captureBuffer.Count}");
+            sb.AppendLine(new string('=', 60));
+            sb.AppendLine();
+
+            foreach (var entry in _captureBuffer)
+            {
+                var device = string.IsNullOrEmpty(entry.DeviceName) ? "" : $" [{entry.DeviceName}]";
+                sb.AppendLine($"{entry.FormattedTime} {entry.LevelTag} {entry.Category,-8}{device} {entry.Message}");
+            }
+
+            File.WriteAllText(filePath, sb.ToString());
+            AddLog(LogCategory.System, $"📁 Logs saved: {filePath} ({_captureBuffer.Count} entries)");
+            StatusText = $"Logs saved to {fileName}";
+        }
+        catch (Exception ex)
+        {
+            AddLog(LogCategory.System, $"Failed to save logs: {ex.Message}", Models.LogLevel.Error);
+        }
+        finally
+        {
+            _captureBuffer.Clear();
+        }
+    }
+
     partial void OnIsRunningChanged(bool value)
     {
         OnPropertyChanged(nameof(CanStart));
@@ -355,7 +433,7 @@ public partial class MainViewModel : ObservableObject
                 device.EstimatedLatencyMs = state.EstimatedLatencyMs;
                 device.ManualDelayMs = state.ManualDelayMs;
                 device.DriftMs = state.DriftMs;
-                device.Status = Math.Abs(state.DriftMs) < 10 ? "Locked" : "Correcting";
+                device.Status = Math.Abs(state.DriftMs) < 3 ? "Locked" : "Correcting";
             }
         });
     }
@@ -383,10 +461,15 @@ public partial class MainViewModel : ObservableObject
     private void AddLogEntry(SyncLogEntry entry)
     {
         DebugLogs.Add(entry);
-        // Keep only last 300 entries
         while (DebugLogs.Count > 300)
         {
             DebugLogs.RemoveAt(0);
+        }
+
+        // Feed to capture buffer if capturing
+        if (IsCapturing)
+        {
+            _captureBuffer.Add(entry);
         }
     }
 

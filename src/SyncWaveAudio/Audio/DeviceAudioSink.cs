@@ -15,8 +15,10 @@ public sealed class DeviceAudioSink : IDisposable
     private readonly object _gate = new();
     private readonly byte[] _silenceChunk;
     private readonly AudioEndpointVolume _endpointVolume;
+    private readonly int _outputLatencyMs;
     private double _lastEndpointVolume = -1;
     private double _smoothedTargetDelayMs;
+    private double _maxChunkMs = 10.0;
     private bool _disposed;
     private bool _debugLogging;
 
@@ -25,6 +27,9 @@ public sealed class DeviceAudioSink : IDisposable
     private long _totalOverflows;
     private long _totalEnqueues;
     private int _consecutiveDriftCorrections;
+
+    /// <summary>Optional callback to route important log entries to the UI.</summary>
+    public Action<SyncLogEntry>? OnLog { get; set; }
 
     public DeviceAudioSink(AudioDeviceInfo deviceInfo, MMDevice endpoint, WaveFormat format, int baseBufferMs, ILogger logger, bool debugLogging)
     {
@@ -42,14 +47,12 @@ public sealed class DeviceAudioSink : IDisposable
         _silenceChunk = new byte[Math.Max(format.AverageBytesPerSecond / 100, format.BlockAlign)];
         _endpointVolume = endpoint.AudioEndpointVolume;
 
-        // Use minimal WasapiOut latency to reduce pipeline delay
-        var outputLatency = Math.Max(20, baseBufferMs / 3);
-        _output = new WasapiOut(endpoint, AudioClientShareMode.Shared, false, outputLatency);
+        // WasapiOut latency — this determines minimum viable buffer level
+        _outputLatencyMs = Math.Max(20, baseBufferMs / 3);
+        _output = new WasapiOut(endpoint, AudioClientShareMode.Shared, false, _outputLatencyMs);
         _output.Init(_buffer);
 
-        _logger.LogInformation("[Sink:{Device}] Created — outputLatency={OutMs}ms, capacity={CapMs}ms, format={Rate}Hz/{Ch}ch",
-            _deviceInfo.FriendlyName, outputLatency, _buffer.BufferDuration.TotalMilliseconds,
-            format.SampleRate, format.Channels);
+        EmitLog(LogCategory.Device, $"Sink created — outputLatency={_outputLatencyMs}ms, target~{TargetMs(baseBufferMs):F0}ms", deviceInfo.FriendlyName);
     }
 
     public string DeviceId => _deviceInfo.Id;
@@ -62,8 +65,16 @@ public sealed class DeviceAudioSink : IDisposable
 
     public void SetDebugLogging(bool enabled) => _debugLogging = enabled;
 
-    /// <summary>Target buffer level in ms — kept minimal to reduce pipeline latency.</summary>
-    private double TargetMs(int baseBufferMs) => Math.Max(8, baseBufferMs * 0.12) + EffectiveDelayMs;
+    /// <summary>
+    /// Target buffer level (peak). Must hold at least the max incoming chunk plus output latency.
+    /// We dynamically track max chunk size and add a 20% safety margin.
+    /// </summary>
+    private double TargetMs(int baseBufferMs)
+    {
+        var safeMinimum = (_maxChunkMs * 1.2) + _outputLatencyMs;
+        var target = Math.Max(baseBufferMs, safeMinimum);
+        return target + EffectiveDelayMs;
+    }
 
     public void Prime(double effectiveDelayMs, int baseBufferMs)
     {
@@ -74,20 +85,18 @@ public sealed class DeviceAudioSink : IDisposable
         var primeBytes = MillisecondsToBytes(primeMs);
         AddSilence(primeBytes);
 
-        _logger.LogInformation("[Sink:{Device}] Primed — delay={DelayMs:F1}ms, prime={PrimeMs:F1}ms, buffered={BufMs}ms",
-            _deviceInfo.FriendlyName, EffectiveDelayMs, primeMs, BufferedMilliseconds);
+        EmitLog(LogCategory.Buffer, $"Primed — delay={EffectiveDelayMs:F1}ms, target={primeMs:F1}ms, buffered={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
     }
 
     public void Start()
     {
         _output.Play();
-        _logger.LogInformation("[Sink:{Device}] Started — buffered={BufMs}ms", _deviceInfo.FriendlyName, BufferedMilliseconds);
+        EmitLog(LogCategory.Device, $"Playback started — buffered={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
     }
 
     public void Stop()
     {
-        _logger.LogInformation("[Sink:{Device}] Stop — enqueues={E}, trimmed={T}B, silence={S}B, overflows={O}",
-            _deviceInfo.FriendlyName, _totalEnqueues, _totalTrimmedBytes, _totalSilenceBytes, _totalOverflows);
+        EmitLog(LogCategory.Device, $"Stopped — enqueues={_totalEnqueues}, trimmed={_totalTrimmedBytes}B, silence={_totalSilenceBytes}B, overflows={_totalOverflows}", _deviceInfo.FriendlyName);
         _output.Stop();
         _buffer.ClearBuffer();
     }
@@ -105,21 +114,26 @@ public sealed class DeviceAudioSink : IDisposable
             var sampleGain = (float)Math.Max(1.0, _deviceInfo.Volume);
             var processed = AudioSampleProcessor.Apply(source, count, _format, sampleGain, _deviceInfo.Mono);
 
+            var chunkMs = BytesToMilliseconds(count);
+            if (chunkMs > _maxChunkMs) _maxChunkMs = chunkMs;
+            else _maxChunkMs = Math.Max(10.0, _maxChunkMs * 0.999); // Slow decay
+
             var capacityMs = _buffer.BufferDuration.TotalMilliseconds;
             if (BufferedMilliseconds + BytesToMilliseconds(count) > capacityMs)
             {
                 _totalOverflows++;
-                if (_debugLogging)
-                    _logger.LogWarning("[Sink:{Device}] OVERFLOW #{N}", _deviceInfo.FriendlyName, _totalOverflows);
+                EmitLog(LogCategory.Buffer, $"OVERFLOW #{_totalOverflows} — buf={BufferedMilliseconds}ms + {BytesToMilliseconds(count):F0}ms > {capacityMs:F0}ms", _deviceInfo.FriendlyName, Models.LogLevel.Warning);
             }
 
             _buffer.AddSamples(processed, 0, processed.Length);
-            CorrectDrift(TargetMs(baseBufferMs));
 
-            if (_debugLogging && _totalEnqueues % 100 == 0)
+            var target = TargetMs(baseBufferMs);
+            CorrectDrift(target);
+
+            // Periodic stats to UI (every 50 enqueues = ~500ms)
+            if (_totalEnqueues % 50 == 0)
             {
-                _logger.LogDebug("[Sink:{Device}] #{N} buf={BufMs}ms target={TMs:F0}ms drift={D:F1}ms",
-                    _deviceInfo.FriendlyName, _totalEnqueues, BufferedMilliseconds, TargetMs(baseBufferMs), DriftMs);
+                EmitLog(LogCategory.Drift, $"#{_totalEnqueues} buf={BufferedMilliseconds}ms target={target:F0}ms drift={DriftMs:F1}ms trim={_totalTrimmedBytes}B pad={_totalSilenceBytes}B", _deviceInfo.FriendlyName);
             }
         }
     }
@@ -146,16 +160,14 @@ public sealed class DeviceAudioSink : IDisposable
         var bufferedMs = _buffer.BufferedDuration.TotalMilliseconds;
         DriftMs = Math.Round(bufferedMs - targetMs, 2);
 
-        // Aggressive initial stabilization for first 50 enqueues
-        var isInitial = _totalEnqueues < 50;
-        var trimThreshold = isInitial ? 4.0 : 8.0;
-        var padThreshold = isInitial ? -3.0 : -6.0;
-        var maxTrimMs = isInitial ? 10.0 : 5.0;
-        var maxPadMs = isInitial ? 8.0 : 4.0;
+        var absDrift = Math.Abs(DriftMs);
 
-        if (DriftMs > trimThreshold)
+        // Dead zone: ±5ms — well below human auditory threshold (~10ms)
+        // This prevents constant TRIM/PAD oscillation with chunky BT delivery
+        if (DriftMs > 5.0)
         {
-            var trimMs = Math.Min(maxTrimMs, DriftMs / 2);
+            // Ahead of target — trim excess (50% of overshoot, max 12ms)
+            var trimMs = Math.Min(12, absDrift * 0.5);
             var trimBytes = MillisecondsToBytes(trimMs);
             if (trimBytes > 0)
             {
@@ -163,22 +175,26 @@ public sealed class DeviceAudioSink : IDisposable
                 _buffer.Read(scratch, 0, scratch.Length);
                 _totalTrimmedBytes += trimBytes;
                 _consecutiveDriftCorrections++;
-                if (_debugLogging)
-                    _logger.LogDebug("[Sink:{Device}] TRIM {TMs:F1}ms drift={D:F1}ms", _deviceInfo.FriendlyName, trimMs, DriftMs);
+                if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
+                    EmitLog(LogCategory.Drift, $"TRIM {trimMs:F1}ms drift={DriftMs:F1}ms buf={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
             }
         }
-        else if (DriftMs < padThreshold)
+        else if (DriftMs < -5.0)
         {
-            var padMs = Math.Min(maxPadMs, Math.Abs(DriftMs) / 2);
+            // Behind target — inject silence (40% of deficit, max 8ms)
+            var padMs = Math.Min(8, absDrift * 0.4);
             var padBytes = MillisecondsToBytes(padMs);
             AddSilence(padBytes);
             _totalSilenceBytes += padBytes;
             _consecutiveDriftCorrections++;
-            if (_debugLogging)
-                _logger.LogDebug("[Sink:{Device}] PAD {PMs:F1}ms drift={D:F1}ms", _deviceInfo.FriendlyName, padMs, DriftMs);
+            if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
+                EmitLog(LogCategory.Drift, $"PAD {padMs:F1}ms drift={DriftMs:F1}ms buf={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
         }
         else
         {
+            // Within ±5ms — locked and stable
+            if (_consecutiveDriftCorrections > 0)
+                EmitLog(LogCategory.Drift, $"LOCKED — drift={DriftMs:F1}ms after {_consecutiveDriftCorrections} corrections", _deviceInfo.FriendlyName);
             _consecutiveDriftCorrections = 0;
         }
     }
@@ -208,6 +224,21 @@ public sealed class DeviceAudioSink : IDisposable
     }
 
     private double BytesToMilliseconds(int bytes) => bytes * 1000.0 / _format.AverageBytesPerSecond;
+
+    private void EmitLog(LogCategory category, string message, string deviceName, Models.LogLevel level = Models.LogLevel.Info)
+    {
+        if (_debugLogging)
+            _logger.LogDebug("[Sink:{Device}] {Message}", deviceName, message);
+
+        OnLog?.Invoke(new SyncLogEntry
+        {
+            Timestamp = DateTimeOffset.Now,
+            Level = level,
+            Category = category,
+            DeviceName = deviceName,
+            Message = message
+        });
+    }
 
     public void Dispose()
     {

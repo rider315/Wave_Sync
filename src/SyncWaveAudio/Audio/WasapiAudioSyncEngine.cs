@@ -93,6 +93,7 @@ public sealed class WasapiAudioSyncEngine(
             var endpoint = enumerator.GetDevice(device.Id);
             var sinkLogger = loggerFactory.CreateLogger($"SyncWaveAudio.Sink.{device.FriendlyName}");
             var sink = new DeviceAudioSink(device, endpoint, format, settings.DefaultBufferMilliseconds, sinkLogger, settings.EnableDebugLogging);
+            sink.OnLog = entry => LogEmitted?.Invoke(this, entry);
 
             var effectiveDelay = CalculateAnchorDelay(device);
             sink.Prime(effectiveDelay, settings.DefaultBufferMilliseconds);
