@@ -5,7 +5,13 @@ public sealed record SyncSnapshot(
     IReadOnlyList<DeviceSyncState> Devices,
     float PeakLeft,
     float PeakRight,
-    bool IsRunning);
+    bool IsRunning,
+    double MaxDriftMs = 0,
+    double AvgDriftMs = 0,
+    int SyncHealthPercent = 100,
+    double CaptureCallbackIntervalMs = 0,
+    long TotalCaptureCallbacks = 0,
+    long TotalBytesCaptur = 0);
 
 public sealed record DeviceSyncState(
     string DeviceId,
@@ -14,4 +20,7 @@ public sealed record DeviceSyncState(
     double EffectiveDelayMs,
     double DriftMs,
     int BufferedMilliseconds,
-    string Status);
+    string Status,
+    long TotalTrimmedBytes = 0,
+    long TotalSilenceBytes = 0,
+    long TotalOverflows = 0);

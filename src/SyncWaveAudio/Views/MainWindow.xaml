@@ -2,15 +2,17 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:models="clr-namespace:SyncWaveAudio.Models"
-        Title="SyncWave Audio" Width="1180" Height="760" MinWidth="980" MinHeight="640"
+        Title="SyncWave Audio" Width="1180" Height="860" MinWidth="980" MinHeight="700"
         WindowStartupLocation="CenterScreen">
     <Grid Background="{StaticResource BrushBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="88" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="42" />
         </Grid.RowDefinitions>
 
+        <!-- Header -->
         <Border Grid.Row="0" Background="{StaticResource BrushSurface}" Padding="26,18">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -30,12 +32,14 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" Margin="24">
+        <!-- Main Content -->
+        <Grid Grid.Row="1" Margin="24,24,24,12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="2.2*" />
                 <ColumnDefinition Width="1*" />
             </Grid.ColumnDefinitions>
 
+            <!-- Device List -->
             <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
                 <ItemsControl ItemsSource="{Binding Devices}">
                     <ItemsControl.ItemTemplate>
@@ -106,49 +110,243 @@
                 </ItemsControl>
             </ScrollViewer>
 
-            <StackPanel Grid.Column="1">
-                <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20" Margin="0,0,0,14">
-                    <StackPanel>
-                        <TextBlock Text="Live Sync" FontSize="19" FontWeight="SemiBold" />
-                        <TextBlock Text="{Binding SelectedDeviceCount, StringFormat=Selected devices: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,8,0,4" />
-                        <TextBlock Text="{Binding SelectedRelayDeviceCount, StringFormat=Relay outputs: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,0,0,14" />
-                        <TextBlock Text="Left" Foreground="{StaticResource BrushMuted}" />
-                        <ProgressBar Height="12" Maximum="1" Value="{Binding PeakLeft}" Margin="0,6,0,12" Foreground="{StaticResource BrushAccent}" Background="{StaticResource BrushSurfaceAlt}" />
-                        <TextBlock Text="Right" Foreground="{StaticResource BrushMuted}" />
-                        <ProgressBar Height="12" Maximum="1" Value="{Binding PeakRight}" Margin="0,6,0,0" Foreground="{StaticResource BrushAccent2}" Background="{StaticResource BrushSurfaceAlt}" />
-                    </StackPanel>
-                </Border>
+            <!-- Right Panel -->
+            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <!-- Live Audio Levels -->
+                    <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20" Margin="0,0,0,14">
+                        <StackPanel>
+                            <TextBlock Text="Live Audio" FontSize="19" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding SelectedDeviceCount, StringFormat=Selected devices: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,8,0,4" />
+                            <TextBlock Text="{Binding SelectedRelayDeviceCount, StringFormat=Relay outputs: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,0,0,14" />
+                            <TextBlock Text="Left" Foreground="{StaticResource BrushMuted}" />
+                            <ProgressBar Height="12" Maximum="1" Value="{Binding PeakLeft}" Margin="0,6,0,12" Foreground="{StaticResource BrushAccent}" Background="{StaticResource BrushSurfaceAlt}" />
+                            <TextBlock Text="Right" Foreground="{StaticResource BrushMuted}" />
+                            <ProgressBar Height="12" Maximum="1" Value="{Binding PeakRight}" Margin="0,6,0,0" Foreground="{StaticResource BrushAccent2}" Background="{StaticResource BrushSurfaceAlt}" />
+                        </StackPanel>
+                    </Border>
 
-                <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20" Margin="0,0,0,14">
-                    <StackPanel>
-                        <TextBlock Text="Sync Calibration" FontSize="19" FontWeight="SemiBold" />
-                        <Canvas Height="110" Margin="0,18,0,10" Background="{StaticResource BrushSurfaceAlt}">
-                            <Polyline Points="0,70 24,70 32,24 42,86 55,70 90,70 102,34 118,78 132,70 360,70"
-                                      Stroke="{StaticResource BrushAccent}" StrokeThickness="3" />
-                            <Polyline Points="0,62 28,62 38,32 48,82 62,62 96,62 110,38 126,76 142,62 360,62"
-                                      Stroke="{StaticResource BrushAccent2}" StrokeThickness="2" Opacity="0.82" />
-                        </Canvas>
-                        <TextBlock Text="Calibration uses timestamp-aligned tone playback and updates delay offsets for selected devices."
-                                   TextWrapping="Wrap" Foreground="{StaticResource BrushMuted}" />
-                    </StackPanel>
-                </Border>
+                    <!-- LIVE Sync Health Panel -->
+                    <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20" Margin="0,0,0,14">
+                        <StackPanel>
+                            <TextBlock Text="Sync Health" FontSize="19" FontWeight="SemiBold" />
 
-                <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20">
-                    <StackPanel>
-                        <TextBlock Text="Settings" FontSize="19" FontWeight="SemiBold" />
-                        <TextBlock Text="EQ preset" Foreground="{StaticResource BrushMuted}" Margin="0,14,0,6" />
-                        <ComboBox ItemsSource="{Binding EqPresets}" SelectedItem="{Binding SelectedEqPreset}" />
-                        <CheckBox Content="Party mode" IsChecked="{Binding PartyMode}" Margin="0,16,0,0" />
-                        <CheckBox Content="Detailed debug logging" IsChecked="{Binding DebugLogging}" Margin="0,10,0,0" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
+                            <!-- Big sync health indicator -->
+                            <Grid Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Health percentage circle -->
+                                <Border Width="72" Height="72" CornerRadius="36" Margin="0,0,16,0">
+                                    <Border.Background>
+                                        <SolidColorBrush Color="{Binding SyncHealthColor, FallbackValue=#9AA7B8}" />
+                                    </Border.Background>
+                                    <TextBlock Text="{Binding SyncHealthPercent, StringFormat={}{0}%}"
+                                               FontSize="22" FontWeight="Bold" Foreground="#0E1117"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold">
+                                        <TextBlock.Text>
+                                            <Binding Path="SyncHealthLabel" />
+                                        </TextBlock.Text>
+                                        <TextBlock.Foreground>
+                                            <SolidColorBrush Color="{Binding SyncHealthColor, FallbackValue=#9AA7B8}" />
+                                        </TextBlock.Foreground>
+                                    </TextBlock>
+                                    <TextBlock Text="{Binding MaxDriftMs, StringFormat=Max drift: {0:F1} ms}" Foreground="{StaticResource BrushMuted}" Margin="0,4,0,0" />
+                                    <TextBlock Text="{Binding AvgDriftMs, StringFormat=Avg drift: {0:F1} ms}" Foreground="{StaticResource BrushMuted}" Margin="0,2,0,0" />
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Per-device drift bars -->
+                            <TextBlock Text="Per-Device Drift" Foreground="{StaticResource BrushMuted}" Margin="0,16,0,6" FontWeight="SemiBold" />
+                            <ItemsControl ItemsSource="{Binding Devices}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type models:AudioDeviceInfo}">
+                                        <Grid Margin="0,3,0,3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="90" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="65" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding FriendlyName}" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" />
+                                            <ProgressBar Grid.Column="1" Height="8" Minimum="0" Maximum="50"
+                                                         Value="{Binding DriftMs, Mode=OneWay}"
+                                                         Background="{StaticResource BrushSurfaceAlt}" Margin="6,0">
+                                                <ProgressBar.Foreground>
+                                                    <SolidColorBrush Color="{StaticResource ColorAccent}" />
+                                                </ProgressBar.Foreground>
+                                            </ProgressBar>
+                                            <TextBlock Grid.Column="2" Text="{Binding DriftMs, StringFormat={}{0:F1}ms}" FontSize="11" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- Capture pipeline stats -->
+                            <Border Background="{StaticResource BrushSurfaceAlt}" CornerRadius="6" Padding="12,8" Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Capture Pipeline" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource BrushAccent2}" />
+                                    <TextBlock Text="{Binding CaptureCallbackIntervalMs, StringFormat=Callback interval: {0:F1} ms}" FontSize="11" Foreground="{StaticResource BrushMuted}" Margin="0,4,0,0" />
+                                    <TextBlock Text="{Binding TotalCaptureCallbacks, StringFormat=Total callbacks: {0:N0}}" FontSize="11" Foreground="{StaticResource BrushMuted}" Margin="0,2,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Settings Panel -->
+                    <Border Background="{StaticResource BrushSurface}" CornerRadius="8" Padding="20">
+                        <StackPanel>
+                            <TextBlock Text="Settings" FontSize="19" FontWeight="SemiBold" />
+
+                            <!-- Buffer Size Slider (User-adjustable in real-time) -->
+                            <TextBlock Text="Buffer Size (latency vs stability)" Foreground="{StaticResource BrushMuted}" Margin="0,14,0,6" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="70" />
+                                </Grid.ColumnDefinitions>
+                                <Slider Minimum="35" Maximum="250" Value="{Binding BufferSizeMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        TickFrequency="10" IsSnapToTickEnabled="True" />
+                                <TextBlock Grid.Column="1" Text="{Binding BufferSizeMs, StringFormat={}{0} ms}" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Grid Margin="0,2,0,0">
+                                <TextBlock Text="◄ Low latency" FontSize="10" Foreground="{StaticResource BrushMuted}" HorizontalAlignment="Left" />
+                                <TextBlock Text="Stable ►" FontSize="10" Foreground="{StaticResource BrushMuted}" HorizontalAlignment="Right" />
+                            </Grid>
+
+                            <TextBlock Text="EQ preset" Foreground="{StaticResource BrushMuted}" Margin="0,14,0,6" />
+                            <ComboBox ItemsSource="{Binding EqPresets}" SelectedItem="{Binding SelectedEqPreset}" />
+                            <CheckBox Content="Party mode" IsChecked="{Binding PartyMode}" Margin="0,16,0,0" />
+                            <CheckBox Content="Detailed debug logging" IsChecked="{Binding DebugLogging}" Margin="0,10,0,0" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
         </Grid>
 
-        <Border Grid.Row="2" Background="{StaticResource BrushSurface}" Padding="24,0">
+        <!-- Debug Log Panel (Collapsible) -->
+        <Border Grid.Row="2" Background="{StaticResource BrushSurface}" Margin="0,0,0,0">
+            <StackPanel>
+                <!-- Toggle Header -->
+                <Border Background="{StaticResource BrushSurfaceAlt}" Padding="24,8" Cursor="Hand">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="📋 Debug Log" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding DebugLogs.Count, StringFormat= ({0} entries)}" FontSize="12" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" Margin="4,0,0,0" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Clear" Command="{Binding ClearLogsCommand}" Padding="10,4" Margin="0,0,6,0" />
+                        <Button Grid.Column="2" Command="{Binding ToggleDebugPanelCommand}" Padding="10,4">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                    <Setter Property="Content" Value="▼ Hide" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsDebugPanelOpen}" Value="False">
+                                            <Setter Property="Content" Value="▲ Show" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <!-- Log List -->
+                <Border MaxHeight="220" Padding="0">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Visible" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsDebugPanelOpen}" Value="False">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <ListBox ItemsSource="{Binding DebugLogs}" Background="Transparent" BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.CanContentScroll="True"
+                             x:Name="DebugLogList">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="24,2,24,2" />
+                                <Setter Property="Background" Value="Transparent" />
+                                <Setter Property="BorderThickness" Value="0" />
+                                <Setter Property="Focusable" Value="False" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type models:SyncLogEntry}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="95" />
+                                        <ColumnDefinition Width="22" />
+                                        <ColumnDefinition Width="70" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding FormattedTime}" FontSize="11" FontFamily="Consolas" Foreground="{StaticResource BrushMuted}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding LevelTag}" FontSize="11" FontFamily="Consolas">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{StaticResource BrushText}" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Level}" Value="{x:Static models:LogLevel.Warning}">
+                                                        <Setter Property="Foreground" Value="#FFB84D" />
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="{x:Static models:LogLevel.Error}">
+                                                        <Setter Property="Foreground" Value="{StaticResource BrushDanger}" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBlock Grid.Column="2" Text="{Binding Category}" FontSize="11" FontFamily="Consolas" Foreground="{StaticResource BrushAccent2}" />
+                                    <TextBlock Grid.Column="3" Text="{Binding Message}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{StaticResource BrushText}" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Level}" Value="{x:Static models:LogLevel.Warning}">
+                                                        <Setter Property="Foreground" Value="#FFB84D" />
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="{x:Static models:LogLevel.Error}">
+                                                        <Setter Property="Foreground" Value="{StaticResource BrushDanger}" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <!-- Status Bar -->
+        <Border Grid.Row="3" Background="{StaticResource BrushSurface}" Padding="24,0">
             <DockPanel LastChildFill="True">
                 <TextBlock Text="Default output is source anchor | Selected devices are relay outputs | Adaptive buffering" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" />
-                <TextBlock Text="{Binding IsRunning, StringFormat=Running: {0}}" Foreground="{StaticResource BrushMuted}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <TextBlock Text="{Binding BufferSizeMs, StringFormat=Buffer: {0}ms}" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" Margin="0,0,18,0" />
+                    <TextBlock Text="{Binding SyncHealthLabel, StringFormat=Sync: {0}}" VerticalAlignment="Center" Margin="0,0,18,0">
+                        <TextBlock.Foreground>
+                            <SolidColorBrush Color="{Binding SyncHealthColor, FallbackValue=#9AA7B8}" />
+                        </TextBlock.Foreground>
+                    </TextBlock>
+                    <TextBlock Text="{Binding IsRunning, StringFormat=Running: {0}}" Foreground="{StaticResource BrushMuted}" VerticalAlignment="Center" />
+                </StackPanel>
             </DockPanel>
         </Border>
     </Grid>

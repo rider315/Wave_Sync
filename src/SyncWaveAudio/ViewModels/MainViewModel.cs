@@ -16,6 +16,7 @@ public partial class MainViewModel : ObservableObject
     private readonly IAudioSyncEngine _syncEngine;
     private readonly IProfileStore _profileStore;
     private readonly ILogger<MainViewModel> _logger;
+    private readonly AppSettings _settings;
     private AudioProfile _profile = new();
 
     [ObservableProperty] private bool isRunning;
@@ -28,20 +29,45 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private float peakRight;
     [ObservableProperty] private string activeTab = "Devices";
 
+    // Live sync health properties
+    [ObservableProperty] private int syncHealthPercent = 100;
+    [ObservableProperty] private double maxDriftMs;
+    [ObservableProperty] private double avgDriftMs;
+    [ObservableProperty] private string syncHealthLabel = "IDLE";
+    [ObservableProperty] private string syncHealthColor = "#9AA7B8";
+    [ObservableProperty] private double captureCallbackIntervalMs;
+    [ObservableProperty] private long totalCaptureCallbacks;
+
+    // Buffer size slider (user adjustable in real-time)
+    [ObservableProperty] private int bufferSizeMs = 80;
+
+    // Debug log panel
+    [ObservableProperty] private bool isDebugPanelOpen = true;
+
     public ObservableCollection<AudioDeviceInfo> Devices { get; } = [];
+    public ObservableCollection<SyncLogEntry> DebugLogs { get; } = [];
     public IReadOnlyList<string> EqPresets { get; } = ["Flat", "Warm", "Vocal Lift", "Bass Control", "Night"];
 
     public MainViewModel(
         IAudioDeviceService deviceService,
         IAudioSyncEngine syncEngine,
         IProfileStore profileStore,
-        ILogger<MainViewModel> logger)
+        ILogger<MainViewModel> logger,
+        AppSettings settings)
     {
         _deviceService = deviceService;
         _syncEngine = syncEngine;
         _profileStore = profileStore;
         _logger = logger;
+        _settings = settings;
+        bufferSizeMs = settings.DefaultBufferMilliseconds;
         _syncEngine.SnapshotReady += OnSnapshotReady;
+
+        // Subscribe to log events from the sync engine
+        if (_syncEngine is WasapiAudioSyncEngine wasapiEngine)
+        {
+            wasapiEngine.LogEmitted += OnLogEmitted;
+        }
     }
 
     public int SelectedDeviceCount => Devices.Count(device => device.IsSelected);
@@ -94,11 +120,13 @@ public partial class MainViewModel : ObservableObject
             }
 
             StatusText = Devices.Count == 0 ? "No active output devices found" : $"Found {Devices.Count} output devices";
+            AddLog(LogCategory.System, $"Scanned {Devices.Count} output devices");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unable to refresh devices.");
             StatusText = ex.Message;
+            AddLog(LogCategory.System, $"Refresh failed: {ex.Message}", Models.LogLevel.Error);
         }
         finally
         {
@@ -133,6 +161,10 @@ public partial class MainViewModel : ObservableObject
                 return;
             }
 
+            // Apply current buffer size to settings before starting
+            _settings.DefaultBufferMilliseconds = BufferSizeMs;
+            AddLog(LogCategory.System, $"Starting sync — buffer={BufferSizeMs}ms, devices={selected.Count}");
+
             await _syncEngine.StartAsync(selected, anchor);
             IsRunning = true;
             StatusText = $"Auto-stabilizing {selected.Count} relay device(s) against {anchor.FriendlyName}.";
@@ -141,6 +173,7 @@ public partial class MainViewModel : ObservableObject
         {
             _logger.LogError(ex, "Unable to start synchronized routing.");
             StatusText = ex.Message;
+            AddLog(LogCategory.System, $"Start failed: {ex.Message}", Models.LogLevel.Error);
         }
         finally
         {
@@ -155,6 +188,11 @@ public partial class MainViewModel : ObservableObject
         await _syncEngine.StopAsync();
         IsRunning = false;
         StatusText = "Stopped";
+        SyncHealthLabel = "IDLE";
+        SyncHealthColor = "#9AA7B8";
+        SyncHealthPercent = 100;
+        MaxDriftMs = 0;
+        AvgDriftMs = 0;
         foreach (var device in Devices)
         {
             if (device.IsSelected)
@@ -164,6 +202,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         StartCommand.NotifyCanExecuteChanged();
+        AddLog(LogCategory.System, "Sync stopped");
     }
 
     [RelayCommand]
@@ -177,6 +216,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         StatusText = "Playing calibration sweep";
+        AddLog(LogCategory.Sync, "Calibration sweep started");
         await _syncEngine.PlayCalibrationToneAsync(selected);
 
         var anchor = Devices.FirstOrDefault(device => device.IsAnchorDevice);
@@ -193,6 +233,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         StatusText = "Calibration profile updated";
+        AddLog(LogCategory.Sync, "Calibration complete — delay offsets updated");
         await SaveProfileAsync();
     }
 
@@ -238,6 +279,18 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    private void ClearLogs()
+    {
+        DebugLogs.Clear();
+    }
+
+    [RelayCommand]
+    private void ToggleDebugPanel()
+    {
+        IsDebugPanelOpen = !IsDebugPanelOpen;
+    }
+
     partial void OnIsRunningChanged(bool value)
     {
         OnPropertyChanged(nameof(CanStart));
@@ -246,7 +299,18 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnSelectedEqPresetChanged(string value) => _ = SaveProfileAsync();
     partial void OnPartyModeChanged(bool value) => _ = SaveProfileAsync();
-    partial void OnDebugLoggingChanged(bool value) => _ = SaveProfileAsync();
+
+    partial void OnDebugLoggingChanged(bool value)
+    {
+        _settings.EnableDebugLogging = value;
+        _ = SaveProfileAsync();
+    }
+
+    partial void OnBufferSizeMsChanged(int value)
+    {
+        _settings.DefaultBufferMilliseconds = value;
+        AddLog(LogCategory.System, $"Buffer size changed to {value}ms");
+    }
 
     private void OnSnapshotReady(object? sender, SyncSnapshot snapshot)
     {
@@ -255,6 +319,30 @@ public partial class MainViewModel : ObservableObject
             PeakLeft = snapshot.PeakLeft;
             PeakRight = snapshot.PeakRight;
             IsRunning = snapshot.IsRunning;
+
+            // Update sync health metrics
+            SyncHealthPercent = snapshot.SyncHealthPercent;
+            MaxDriftMs = snapshot.MaxDriftMs;
+            AvgDriftMs = snapshot.AvgDriftMs;
+            CaptureCallbackIntervalMs = snapshot.CaptureCallbackIntervalMs;
+            TotalCaptureCallbacks = snapshot.TotalCaptureCallbacks;
+
+            // Color-coded sync status
+            if (snapshot.MaxDriftMs < 5)
+            {
+                SyncHealthLabel = "LOCKED";
+                SyncHealthColor = "#3DD6B3"; // Green/accent
+            }
+            else if (snapshot.MaxDriftMs < 15)
+            {
+                SyncHealthLabel = "CORRECTING";
+                SyncHealthColor = "#FFB84D"; // Yellow/warning
+            }
+            else
+            {
+                SyncHealthLabel = "DRIFTING";
+                SyncHealthColor = "#FF667A"; // Red/danger
+            }
 
             foreach (var state in snapshot.Devices)
             {
@@ -267,9 +355,39 @@ public partial class MainViewModel : ObservableObject
                 device.EstimatedLatencyMs = state.EstimatedLatencyMs;
                 device.ManualDelayMs = state.ManualDelayMs;
                 device.DriftMs = state.DriftMs;
-                device.Status = Math.Abs(state.DriftMs) < 20 ? "Locked" : "Correcting";
+                device.Status = Math.Abs(state.DriftMs) < 10 ? "Locked" : "Correcting";
             }
         });
+    }
+
+    private void OnLogEmitted(object? sender, SyncLogEntry entry)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            AddLogEntry(entry);
+        });
+    }
+
+    private void AddLog(LogCategory category, string message, Models.LogLevel level = Models.LogLevel.Info, string deviceName = "")
+    {
+        AddLogEntry(new SyncLogEntry
+        {
+            Timestamp = DateTimeOffset.Now,
+            Level = level,
+            Category = category,
+            DeviceName = deviceName,
+            Message = message
+        });
+    }
+
+    private void AddLogEntry(SyncLogEntry entry)
+    {
+        DebugLogs.Add(entry);
+        // Keep only last 300 entries
+        while (DebugLogs.Count > 300)
+        {
+            DebugLogs.RemoveAt(0);
+        }
     }
 
     private void ApplyProfile(AudioDeviceInfo device)

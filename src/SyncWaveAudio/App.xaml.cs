@@ -21,6 +21,7 @@ public partial class App : Application
                 logging.ClearProviders();
                 logging.AddDebug();
                 logging.AddConsole();
+                logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Debug);
             })
             .ConfigureServices(services =>
             {
