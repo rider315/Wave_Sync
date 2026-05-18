@@ -45,7 +45,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     public int SelectedDeviceCount => Devices.Count(device => device.IsSelected);
-    public int SelectedRelayDeviceCount => Devices.Count(device => device.IsSelected && device.IsRelayOutput);
+    public int SelectedRelayDeviceCount => Devices.Count(device => device.IsSelected && device.IsRelayOutput && device.IsConnected);
     public bool CanStart => !IsRunning && SelectedRelayDeviceCount >= 1;
 
     [RelayCommand]
@@ -74,6 +74,11 @@ public partial class MainViewModel : ObservableObject
 
                 device.PropertyChanged += (_, args) =>
                 {
+                    if (!device.IsConnected && device.IsSelected)
+                    {
+                        device.IsSelected = false;
+                    }
+
                     if (args.PropertyName == nameof(AudioDeviceInfo.Volume))
                     {
                         _ = _deviceService.SetEndpointVolumeAsync(device, device.Volume);
@@ -114,16 +119,23 @@ public partial class MainViewModel : ObservableObject
                 await _deviceService.SetEndpointVolumeAsync(device, device.Volume);
             }
 
-            var selected = Devices.Where(device => device.IsSelected && device.IsRelayOutput).ToList();
+            var selected = Devices.Where(device => device.IsSelected && device.IsRelayOutput && device.IsConnected).ToList();
             if (selected.Count == 0)
             {
                 StatusText = "Select your current speaker if you want, plus at least one extra relay device.";
                 return;
             }
 
-            await _syncEngine.StartAsync(selected);
+            var anchor = Devices.FirstOrDefault(device => device.IsAnchorDevice);
+            if (anchor is null)
+            {
+                StatusText = "Set a Windows default output device first, then refresh SyncWave.";
+                return;
+            }
+
+            await _syncEngine.StartAsync(selected, anchor);
             IsRunning = true;
-            StatusText = $"Streaming to {selected.Count} relay device(s). Selected anchor plays normally through Windows.";
+            StatusText = $"Auto-stabilizing {selected.Count} relay device(s) against {anchor.FriendlyName}.";
         }
         catch (Exception ex)
         {
@@ -157,7 +169,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task CalibrateAsync()
     {
-        var selected = Devices.Where(device => device.IsSelected && device.IsRelayOutput).ToList();
+        var selected = Devices.Where(device => device.IsSelected && device.IsRelayOutput && device.IsConnected).ToList();
         if (selected.Count == 0)
         {
             StatusText = "Select at least one relay device before calibration";
@@ -167,11 +179,17 @@ public partial class MainViewModel : ObservableObject
         StatusText = "Playing calibration sweep";
         await _syncEngine.PlayCalibrationToneAsync(selected);
 
-        var maxLatency = selected.Max(device => device.EstimatedLatencyMs);
+        var anchor = Devices.FirstOrDefault(device => device.IsAnchorDevice);
+        if (anchor is null)
+        {
+            StatusText = "Set a Windows default output device first, then refresh SyncWave.";
+            return;
+        }
+
         foreach (var device in selected)
         {
-            device.ManualDelayMs = Math.Round(maxLatency - device.EstimatedLatencyMs, 1);
-            device.Status = "Calibrated";
+            device.ManualDelayMs = Math.Round(Math.Max(0, anchor.EstimatedLatencyMs - device.EstimatedLatencyMs), 1);
+            device.Status = device.ManualDelayMs > 0 ? "Anchor calibrated" : "Use delay if this device is late";
         }
 
         StatusText = "Calibration profile updated";
@@ -283,6 +301,10 @@ public partial class MainViewModel : ObservableObject
             if (device.IsAnchorDevice)
             {
                 device.Status = "Source / Anchor";
+            }
+            else if (!device.IsConnected)
+            {
+                device.Status = "Connect in Windows, then refresh";
             }
         }
 

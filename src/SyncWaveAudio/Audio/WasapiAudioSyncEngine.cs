@@ -22,8 +22,9 @@ public sealed class WasapiAudioSyncEngine(
     public event EventHandler<SyncSnapshot>? SnapshotReady;
 
     public bool IsRunning { get; private set; }
+    private double _anchorLatencyMs;
 
-    public Task StartAsync(IReadOnlyList<AudioDeviceInfo> devices, CancellationToken cancellationToken = default)
+    public Task StartAsync(IReadOnlyList<AudioDeviceInfo> devices, AudioDeviceInfo anchorDevice, CancellationToken cancellationToken = default)
     {
         if (devices.Any(device => device.IsDefaultOutput))
         {
@@ -36,6 +37,7 @@ public sealed class WasapiAudioSyncEngine(
         }
 
         StopInternal();
+        _anchorLatencyMs = anchorDevice.EstimatedLatencyMs;
 
         using var enumerator = new MMDeviceEnumerator();
         var captureEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
@@ -50,17 +52,16 @@ public sealed class WasapiAudioSyncEngine(
         };
 
         var format = _capture.WaveFormat;
-        var maxLatency = devices.Max(device => device.EstimatedLatencyMs);
 
         foreach (var device in devices)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var endpoint = enumerator.GetDevice(device.Id);
             var sink = new DeviceAudioSink(device, endpoint, format, settings.DefaultBufferMilliseconds);
-            var effectiveDelay = maxLatency - device.EstimatedLatencyMs + device.ManualDelayMs;
+            var effectiveDelay = CalculateAnchorDelay(device);
             sink.Prime(effectiveDelay, settings.DefaultBufferMilliseconds);
             _sinks.Add(sink);
-            device.Status = "Synced";
+            device.Status = effectiveDelay > 0 ? "Anchor aligned" : "Monitoring";
         }
 
         foreach (var sink in _sinks)
@@ -119,17 +120,23 @@ public sealed class WasapiAudioSyncEngine(
                 return;
             }
 
-            var maxLatency = _sinks
-                .Select(sink => sink.Snapshot())
-                .Max(state => state.EstimatedLatencyMs);
-
             foreach (var sink in _sinks)
             {
                 var snapshot = sink.Snapshot();
-                var effectiveDelay = maxLatency - snapshot.EstimatedLatencyMs + snapshot.ManualDelayMs;
+                var effectiveDelay = CalculateAnchorDelay(snapshot.EstimatedLatencyMs, snapshot.ManualDelayMs);
                 sink.Enqueue(args.Buffer, args.BytesRecorded, effectiveDelay, settings.DefaultBufferMilliseconds);
             }
         }
+    }
+
+    private double CalculateAnchorDelay(AudioDeviceInfo device)
+    {
+        return CalculateAnchorDelay(device.EstimatedLatencyMs, device.ManualDelayMs);
+    }
+
+    private double CalculateAnchorDelay(double relayLatencyMs, double manualDelayMs)
+    {
+        return Math.Max(0, _anchorLatencyMs - relayLatencyMs + manualDelayMs);
     }
 
     private void AnalyzePeak(byte[] buffer, int bytesRecorded, WaveFormat? format)

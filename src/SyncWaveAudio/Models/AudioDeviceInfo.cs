@@ -21,16 +21,29 @@ public partial class AudioDeviceInfo : ObservableObject
     [ObservableProperty] private bool enhancementEnabled = true;
     [ObservableProperty] private bool spatialPreferred;
     [ObservableProperty] private bool isConnected = true;
+    [ObservableProperty] private string deviceState = "Active";
     [ObservableProperty] private string status = "Ready";
 
     public bool IsAnchorDevice => IsDefaultOutput;
     public bool IsRelayOutput => !IsDefaultOutput;
-    public string DeviceRoleLabel => IsDefaultOutput ? "Source / Anchor" : "Relay Output";
+    public bool IsSelectableOutput => IsConnected;
+    public string DeviceRoleLabel => IsDefaultOutput ? "Source / Anchor" : IsConnected ? "Relay Output" : "Paired / Disconnected";
 
     partial void OnIsDefaultOutputChanged(bool value)
     {
         OnPropertyChanged(nameof(IsAnchorDevice));
         OnPropertyChanged(nameof(IsRelayOutput));
+        OnPropertyChanged(nameof(DeviceRoleLabel));
+    }
+
+    partial void OnIsConnectedChanged(bool value)
+    {
+        if (!value)
+        {
+            IsSelected = false;
+        }
+
+        OnPropertyChanged(nameof(IsSelectableOutput));
         OnPropertyChanged(nameof(DeviceRoleLabel));
     }
 }

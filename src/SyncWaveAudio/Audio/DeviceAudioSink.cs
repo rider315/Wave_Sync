@@ -14,6 +14,7 @@ public sealed class DeviceAudioSink : IDisposable
     private readonly byte[] _silenceChunk;
     private readonly AudioEndpointVolume _endpointVolume;
     private double _lastEndpointVolume = -1;
+    private double _smoothedTargetDelayMs;
     private bool _disposed;
 
     public DeviceAudioSink(AudioDeviceInfo deviceInfo, MMDevice endpoint, WaveFormat format, int baseBufferMs)
@@ -40,6 +41,7 @@ public sealed class DeviceAudioSink : IDisposable
     public void Prime(double effectiveDelayMs, int baseBufferMs)
     {
         EffectiveDelayMs = Math.Max(0, effectiveDelayMs);
+        _smoothedTargetDelayMs = EffectiveDelayMs;
         var totalPrimeMs = baseBufferMs + EffectiveDelayMs;
         AddSilence(MillisecondsToBytes(totalPrimeMs));
     }
@@ -61,13 +63,22 @@ public sealed class DeviceAudioSink : IDisposable
 
         lock (_gate)
         {
-            EffectiveDelayMs = Math.Max(0, effectiveDelayMs);
+            EffectiveDelayMs = SmoothDelay(effectiveDelayMs);
             ApplyEndpointVolume();
             var sampleGain = (float)Math.Max(1.0, _deviceInfo.Volume);
             var processed = AudioSampleProcessor.Apply(source, count, _format, sampleGain, _deviceInfo.Mono);
             _buffer.AddSamples(processed, 0, processed.Length);
             CorrectDrift(baseBufferMs + EffectiveDelayMs);
         }
+    }
+
+    private double SmoothDelay(double requestedDelayMs)
+    {
+        requestedDelayMs = Math.Max(0, requestedDelayMs);
+        var delta = requestedDelayMs - _smoothedTargetDelayMs;
+        var step = Math.Clamp(delta, -2.5, 2.5);
+        _smoothedTargetDelayMs += step;
+        return Math.Round(_smoothedTargetDelayMs, 2);
     }
 
     public DeviceSyncState Snapshot()

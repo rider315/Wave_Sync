@@ -55,6 +55,7 @@
 
                                     <CheckBox Grid.RowSpan="3"
                                               IsChecked="{Binding IsSelected}"
+                                              IsEnabled="{Binding IsSelectableOutput}"
                                               VerticalAlignment="Top"
                                               Margin="0,5,14,0" />
 
@@ -62,6 +63,7 @@
                                         <TextBlock Text="{Binding FriendlyName}" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                         <WrapPanel Margin="0,8,0,0">
                                             <TextBlock Text="{Binding DeviceRoleLabel}" Foreground="{StaticResource BrushAccent}" FontWeight="SemiBold" Margin="0,0,18,0" />
+                                            <TextBlock Text="{Binding DeviceState, StringFormat=State: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,0,18,0" />
                                             <TextBlock Text="{Binding Codec, StringFormat=Codec: {0}}" Foreground="{StaticResource BrushMuted}" Margin="0,0,18,0" />
                                             <TextBlock Text="{Binding EstimatedLatencyMs, StringFormat=Latency: {0:F1} ms}" Foreground="{StaticResource BrushMuted}" Margin="0,0,18,0" />
                                             <TextBlock Text="{Binding DriftMs, StringFormat=Drift: {0:F1} ms}" Foreground="{StaticResource BrushMuted}" Margin="0,0,18,0" />

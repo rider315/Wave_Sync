@@ -11,9 +11,12 @@ public sealed class WasapiAudioDeviceService(
     public async Task<IReadOnlyList<AudioDeviceInfo>> GetOutputDevicesAsync(CancellationToken cancellationToken = default)
     {
         using var enumerator = new MMDeviceEnumerator();
-        using var defaultEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-            .OrderByDescending(device => string.Equals(device.ID, defaultEndpoint.ID, StringComparison.OrdinalIgnoreCase))
+        var defaultEndpointId = GetDefaultEndpointId(enumerator);
+        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All)
+            .Where(device => device.State is DeviceState.Active or DeviceState.Unplugged or DeviceState.NotPresent)
+            .OrderByDescending(device => string.Equals(device.ID, defaultEndpointId, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(device => LooksLikeBluetoothEndpoint(device.FriendlyName))
+            .ThenByDescending(device => device.State == DeviceState.Active)
             .ThenBy(device => device.FriendlyName)
             .ToList();
 
@@ -22,20 +25,24 @@ public sealed class WasapiAudioDeviceService(
         {
             cancellationToken.ThrowIfCancellationRequested();
             var telemetry = await bluetoothTelemetry.GetTelemetryAsync(endpoint.FriendlyName, cancellationToken);
-            var isDefaultOutput = string.Equals(endpoint.ID, defaultEndpoint.ID, StringComparison.OrdinalIgnoreCase);
+            var isDefaultOutput = string.Equals(endpoint.ID, defaultEndpointId, StringComparison.OrdinalIgnoreCase);
+            var isConnected = endpoint.State == DeviceState.Active;
+            var isBluetooth = telemetry.IsBluetooth || LooksLikeBluetoothEndpoint(endpoint.FriendlyName);
             result.Add(new AudioDeviceInfo
             {
                 Id = endpoint.ID,
                 Name = endpoint.DeviceFriendlyName,
                 FriendlyName = endpoint.FriendlyName,
                 IsDefaultOutput = isDefaultOutput,
-                IsBluetooth = telemetry.IsBluetooth,
+                IsBluetooth = isBluetooth,
                 BatteryPercent = telemetry.BatteryPercent,
                 SignalStrength = telemetry.SignalStrength,
                 Codec = telemetry.Codec,
-                EstimatedLatencyMs = EstimateBaseLatency(endpoint, telemetry),
+                EstimatedLatencyMs = EstimateBaseLatency(endpoint, telemetry, isConnected),
                 Volume = GetEndpointVolume(endpoint),
-                Status = isDefaultOutput ? "Source / Anchor" : "Ready"
+                IsConnected = isConnected,
+                DeviceState = endpoint.State.ToString(),
+                Status = isDefaultOutput ? "Source / Anchor" : isConnected ? "Ready" : "Connect in Windows, then refresh"
             });
         }
 
@@ -68,9 +75,25 @@ public sealed class WasapiAudioDeviceService(
         return Task.CompletedTask;
     }
 
-    private static double EstimateBaseLatency(MMDevice device, BluetoothTelemetry telemetry)
+    private static double EstimateBaseLatency(MMDevice device, BluetoothTelemetry telemetry, bool isConnected)
     {
-        var engineLatencyMs = device.AudioClient.DefaultDevicePeriod / 10_000.0;
+        var devicePeriodMs = 10.0;
+        var streamLatencyMs = 0.0;
+        if (isConnected)
+        {
+            try
+            {
+                devicePeriodMs = device.AudioClient.DefaultDevicePeriod / 10_000.0;
+                streamLatencyMs = device.AudioClient.StreamLatency / 10_000.0;
+            }
+            catch
+            {
+                devicePeriodMs = 10.0;
+                streamLatencyMs = 0.0;
+            }
+        }
+
+        var engineLatencyMs = Math.Max(devicePeriodMs, streamLatencyMs);
         var codecPenalty = telemetry.Codec switch
         {
             "aptX" => 120,
@@ -82,6 +105,31 @@ public sealed class WasapiAudioDeviceService(
         };
 
         return Math.Round(engineLatencyMs + codecPenalty, 1);
+    }
+
+    private static string? GetDefaultEndpointId(MMDeviceEnumerator enumerator)
+    {
+        try
+        {
+            using var defaultEndpoint = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            return defaultEndpoint.ID;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool LooksLikeBluetoothEndpoint(string name)
+    {
+        var lower = name.ToLowerInvariant();
+        return lower.Contains("bluetooth", StringComparison.Ordinal)
+            || lower.Contains("headphones", StringComparison.Ordinal)
+            || lower.Contains("headset", StringComparison.Ordinal)
+            || lower.Contains("buds", StringComparison.Ordinal)
+            || lower.Contains("a2dp", StringComparison.Ordinal)
+            || lower.Contains("stereo", StringComparison.Ordinal)
+            || lower.Contains("hands-free", StringComparison.Ordinal);
     }
 
     private static double GetEndpointVolume(MMDevice device)
