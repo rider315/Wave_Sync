@@ -23,6 +23,7 @@ public partial class AudioDeviceInfo : ObservableObject
     [ObservableProperty] private bool isConnected = true;
     [ObservableProperty] private string deviceState = "Active";
     [ObservableProperty] private string status = "Ready";
+    [ObservableProperty] private float[]? waveformSamples;
 
     public bool IsAnchorDevice => IsDefaultOutput;
     public bool IsRelayOutput => !IsDefaultOutput;

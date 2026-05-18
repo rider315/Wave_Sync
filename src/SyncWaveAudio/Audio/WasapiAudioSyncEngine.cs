@@ -21,6 +21,11 @@ public sealed class WasapiAudioSyncEngine(
     private float _peakRight;
     private bool _disposed;
 
+    // Waveform visualizer ring buffer (128 samples)
+    private const int WaveformSize = 128;
+    private readonly float[] _waveformRing = new float[WaveformSize];
+    private int _waveformWritePos;
+
     // Capture pipeline metrics
     private readonly Stopwatch _captureStopwatch = new();
     private long _totalCaptureCallbacks;
@@ -164,6 +169,7 @@ public sealed class WasapiAudioSyncEngine(
         _totalBytesCaptured += args.BytesRecorded;
 
         AnalyzePeak(args.Buffer, args.BytesRecorded, _capture?.WaveFormat);
+        CaptureWaveformSamples(args.Buffer, args.BytesRecorded, _capture?.WaveFormat);
 
         lock (_gate)
         {
@@ -225,6 +231,38 @@ public sealed class WasapiAudioSyncEngine(
         _peakRight = right;
     }
 
+    private void CaptureWaveformSamples(byte[] buffer, int bytesRecorded, WaveFormat? format)
+    {
+        if (format is null || format.Encoding != WaveFormatEncoding.IeeeFloat || format.BitsPerSample != 32)
+            return;
+
+        var totalSamples = bytesRecorded / sizeof(float);
+        var channels = format.Channels;
+        // Decimate: pick every Nth mono-mixed sample to fill the ring buffer
+        var step = Math.Max(1, totalSamples / (channels * 32));
+        for (var i = 0; i < totalSamples; i += step * channels)
+        {
+            var left = BitConverter.ToSingle(buffer, i * sizeof(float));
+            var right = (channels > 1 && i + 1 < totalSamples)
+                ? BitConverter.ToSingle(buffer, (i + 1) * sizeof(float))
+                : left;
+            var mono = (left + right) * 0.5f;
+            _waveformRing[_waveformWritePos % WaveformSize] = mono;
+            _waveformWritePos++;
+        }
+    }
+
+    private float[] GetWaveformSnapshot()
+    {
+        var snapshot = new float[WaveformSize];
+        var readPos = _waveformWritePos;
+        for (var i = 0; i < WaveformSize; i++)
+        {
+            snapshot[i] = _waveformRing[(readPos + i) % WaveformSize];
+        }
+        return snapshot;
+    }
+
     private void PublishSnapshot()
     {
         var deviceStates = _sinks.Select(sink => sink.Snapshot()).ToList();
@@ -264,6 +302,8 @@ public sealed class WasapiAudioSyncEngine(
             sink.SetDebugLogging(settings.EnableDebugLogging);
         }
 
+        var waveform = GetWaveformSnapshot();
+
         var snapshot = new SyncSnapshot(
             DateTimeOffset.Now,
             deviceStates,
@@ -275,7 +315,8 @@ public sealed class WasapiAudioSyncEngine(
             healthPercent,
             Math.Round(_lastCallbackIntervalMs, 1),
             _totalCaptureCallbacks,
-            _totalBytesCaptured);
+            _totalBytesCaptured,
+            waveform);
 
         SnapshotReady?.Invoke(this, snapshot);
     }

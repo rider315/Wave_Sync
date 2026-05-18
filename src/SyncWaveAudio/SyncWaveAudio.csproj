@@ -22,5 +22,6 @@
 
   <ItemGroup>
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="synchord_logo.png" />
   </ItemGroup>
 </Project>

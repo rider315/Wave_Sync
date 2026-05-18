@@ -12,8 +12,7 @@ public sealed class WasapiAudioDeviceService(
     {
         using var enumerator = new MMDeviceEnumerator();
         var defaultEndpointId = GetDefaultEndpointId(enumerator);
-        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All)
-            .Where(device => device.State is DeviceState.Active or DeviceState.Unplugged or DeviceState.NotPresent)
+        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
             .OrderByDescending(device => string.Equals(device.ID, defaultEndpointId, StringComparison.OrdinalIgnoreCase))
             .ThenByDescending(device => LooksLikeBluetoothEndpoint(device.FriendlyName))
             .ThenByDescending(device => device.State == DeviceState.Active)

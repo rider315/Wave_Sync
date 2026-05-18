@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -51,6 +52,21 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private int captureCountdown;
     private readonly List<SyncLogEntry> _captureBuffer = [];
     private Timer? _captureTimer;
+
+    // Waveform visualizer
+    [ObservableProperty] private float[]? waveformSamples;
+
+    // Master volume
+    [ObservableProperty] private double masterVolume = 1.0;
+
+    // Session uptime
+    [ObservableProperty] private string sessionUptime = "--:--";
+    private readonly Stopwatch _sessionStopwatch = new();
+    private Timer? _uptimeTimer;
+
+    // Sync health smoothing (hysteresis to prevent rapid state flipping)
+    private double _smoothedMaxDrift;
+    private int _healthStateHoldCount;
 
     public ObservableCollection<AudioDeviceInfo> Devices { get; } = [];
     public ObservableCollection<SyncLogEntry> DebugLogs { get; } = [];
@@ -176,6 +192,19 @@ public partial class MainViewModel : ObservableObject
             await _syncEngine.StartAsync(selected, anchor);
             IsRunning = true;
             StatusText = $"Auto-stabilizing {selected.Count} relay device(s) against {anchor.FriendlyName}.";
+
+            // Start uptime timer
+            _sessionStopwatch.Restart();
+            _uptimeTimer = new Timer(_ =>
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var elapsed = _sessionStopwatch.Elapsed;
+                    SessionUptime = elapsed.Hours > 0
+                        ? $"{elapsed.Hours:D2}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}"
+                        : $"{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
+                });
+            }, null, 0, 1000);
         }
         catch (Exception ex)
         {
@@ -201,6 +230,12 @@ public partial class MainViewModel : ObservableObject
         SyncHealthPercent = 100;
         MaxDriftMs = 0;
         AvgDriftMs = 0;
+        WaveformSamples = null;
+        SessionUptime = "--:--";
+        _sessionStopwatch.Stop();
+        _uptimeTimer?.Dispose();
+        _uptimeTimer = null;
+
         foreach (var device in Devices)
         {
             if (device.IsSelected)
@@ -325,6 +360,43 @@ public partial class MainViewModel : ObservableObject
         }, null, 1000, 1000);
     }
 
+    // ══════════ QUICK PRESETS ══════════
+
+    [RelayCommand]
+    private void ApplyPresetLowLatency()
+    {
+        BufferSizeMs = 40;
+        AddLog(LogCategory.System, "🎯 Preset applied: Low Latency (40ms buffer)");
+        StatusText = "Preset: Low Latency — minimal delay, may glitch on weak Bluetooth";
+    }
+
+    [RelayCommand]
+    private void ApplyPresetBalanced()
+    {
+        BufferSizeMs = 80;
+        AddLog(LogCategory.System, "⚖ Preset applied: Balanced (80ms buffer)");
+        StatusText = "Preset: Balanced — good mix of latency and stability";
+    }
+
+    [RelayCommand]
+    private void ApplyPresetStable()
+    {
+        BufferSizeMs = 160;
+        AddLog(LogCategory.System, "🛡 Preset applied: Stable (160ms buffer)");
+        StatusText = "Preset: Stable — maximum reliability for weak connections";
+    }
+
+    // ══════════ MASTER VOLUME ══════════
+
+    partial void OnMasterVolumeChanged(double value)
+    {
+        foreach (var device in Devices)
+        {
+            device.Volume = value;
+        }
+        AddLog(LogCategory.System, $"Master volume set to {value:P0}");
+    }
+
     private void SaveCapturedLogs()
     {
         try
@@ -338,7 +410,7 @@ public partial class MainViewModel : ObservableObject
             var filePath = Path.Combine(logsDir, fileName);
 
             var sb = new StringBuilder();
-            sb.AppendLine($"=== SyncWave Audio Log Capture ===");
+            sb.AppendLine($"=== Synchord Log Capture ===");
             sb.AppendLine($"Captured at: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             sb.AppendLine($"Buffer size: {BufferSizeMs}ms");
             sb.AppendLine($"Running: {IsRunning}");
@@ -405,21 +477,45 @@ public partial class MainViewModel : ObservableObject
             CaptureCallbackIntervalMs = snapshot.CaptureCallbackIntervalMs;
             TotalCaptureCallbacks = snapshot.TotalCaptureCallbacks;
 
-            // Color-coded sync status
-            if (snapshot.MaxDriftMs < 5)
+            // Waveform data
+            WaveformSamples = snapshot.WaveformSamples;
+
+            // Smoothed drift for hysteresis (EMA with alpha=0.3)
+            _smoothedMaxDrift = _smoothedMaxDrift * 0.7 + snapshot.MaxDriftMs * 0.3;
+
+            // Color-coded sync status with hysteresis
+            string newLabel;
+            string newColor;
+            if (_smoothedMaxDrift < 4)
             {
-                SyncHealthLabel = "LOCKED";
-                SyncHealthColor = "#3DD6B3"; // Green/accent
+                newLabel = "LOCKED";
+                newColor = "#3DD6B3";
             }
-            else if (snapshot.MaxDriftMs < 15)
+            else if (_smoothedMaxDrift < 18)
             {
-                SyncHealthLabel = "CORRECTING";
-                SyncHealthColor = "#FFB84D"; // Yellow/warning
+                newLabel = "CORRECTING";
+                newColor = "#FFB84D";
             }
             else
             {
-                SyncHealthLabel = "DRIFTING";
-                SyncHealthColor = "#FF667A"; // Red/danger
+                newLabel = "DRIFTING";
+                newColor = "#FF667A";
+            }
+
+            // Only change state after 3 consecutive snapshots agree (hysteresis)
+            if (newLabel != SyncHealthLabel)
+            {
+                _healthStateHoldCount++;
+                if (_healthStateHoldCount >= 3)
+                {
+                    SyncHealthLabel = newLabel;
+                    SyncHealthColor = newColor;
+                    _healthStateHoldCount = 0;
+                }
+            }
+            else
+            {
+                _healthStateHoldCount = 0;
             }
 
             foreach (var state in snapshot.Devices)
@@ -433,6 +529,7 @@ public partial class MainViewModel : ObservableObject
                 device.EstimatedLatencyMs = state.EstimatedLatencyMs;
                 device.ManualDelayMs = state.ManualDelayMs;
                 device.DriftMs = state.DriftMs;
+                device.WaveformSamples = state.WaveformSamples;
                 device.Status = Math.Abs(state.DriftMs) < 3 ? "Locked" : "Correcting";
             }
         });

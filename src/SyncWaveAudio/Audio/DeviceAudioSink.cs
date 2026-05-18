@@ -22,6 +22,11 @@ public sealed class DeviceAudioSink : IDisposable
     private bool _disposed;
     private bool _debugLogging;
 
+    // Per-device waveform ring buffer
+    private const int WaveformSize = 64;
+    private readonly float[] _waveformRing = new float[WaveformSize];
+    private int _waveformWritePos;
+
     private long _totalTrimmedBytes;
     private long _totalSilenceBytes;
     private long _totalOverflows;
@@ -126,6 +131,7 @@ public sealed class DeviceAudioSink : IDisposable
             }
 
             _buffer.AddSamples(processed, 0, processed.Length);
+            CaptureWaveform(processed);
 
             var target = TargetMs(baseBufferMs);
             CorrectDrift(target);
@@ -150,9 +156,33 @@ public sealed class DeviceAudioSink : IDisposable
     public DeviceSyncState Snapshot()
     {
         return new DeviceSyncState(
-            _deviceInfo.Id, _deviceInfo.EstimatedLatencyMs, _deviceInfo.ManualDelayMs,
+            _deviceInfo.Id, _deviceInfo.FriendlyName, _deviceInfo.EstimatedLatencyMs, _deviceInfo.ManualDelayMs,
             EffectiveDelayMs, DriftMs, BufferedMilliseconds, _deviceInfo.Status,
+            GetWaveformSnapshot(),
             _totalTrimmedBytes, _totalSilenceBytes, _totalOverflows);
+    }
+
+    private void CaptureWaveform(byte[] processed)
+    {
+        if (_format.Encoding != NAudio.Wave.WaveFormatEncoding.IeeeFloat || _format.BitsPerSample != 32) return;
+        var totalSamples = processed.Length / sizeof(float);
+        var ch = _format.Channels;
+        var step = Math.Max(1, totalSamples / (ch * 16));
+        for (var i = 0; i < totalSamples; i += step * ch)
+        {
+            var s = BitConverter.ToSingle(processed, i * sizeof(float));
+            _waveformRing[_waveformWritePos % WaveformSize] = s;
+            _waveformWritePos++;
+        }
+    }
+
+    private float[] GetWaveformSnapshot()
+    {
+        var snap = new float[WaveformSize];
+        var pos = _waveformWritePos;
+        for (var i = 0; i < WaveformSize; i++)
+            snap[i] = _waveformRing[(pos + i) % WaveformSize];
+        return snap;
     }
 
     private void CorrectDrift(double targetMs)
