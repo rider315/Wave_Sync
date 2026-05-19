@@ -52,6 +52,10 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private int captureCountdown;
     private readonly List<SyncLogEntry> _captureBuffer = [];
     private Timer? _captureTimer;
+    private double _captureMaxDriftMs;
+    private double _captureAvgDriftSumMs;
+    private double _captureMaxCallbackIntervalMs;
+    private long _captureSnapshotCount;
 
     // Waveform visualizer
     [ObservableProperty] private float[]? waveformSamples;
@@ -342,6 +346,10 @@ public partial class MainViewModel : ObservableObject
         IsCapturing = true;
         CaptureCountdown = 10;
         _captureBuffer.Clear();
+        _captureMaxDriftMs = 0;
+        _captureAvgDriftSumMs = 0;
+        _captureMaxCallbackIntervalMs = 0;
+        _captureSnapshotCount = 0;
         AddLog(LogCategory.System, "📸 Log capture started — recording for 10 seconds...");
 
         _captureTimer = new Timer(_ =>
@@ -417,6 +425,10 @@ public partial class MainViewModel : ObservableObject
             sb.AppendLine($"Devices: {SelectedDeviceCount} selected, {SelectedRelayDeviceCount} relay");
             sb.AppendLine($"Sync health: {SyncHealthPercent}% ({SyncHealthLabel})");
             sb.AppendLine($"Max drift: {MaxDriftMs:F1}ms, Avg drift: {AvgDriftMs:F1}ms");
+            sb.AppendLine($"Capture max drift observed: {_captureMaxDriftMs:F1}ms");
+            sb.AppendLine($"Capture avg drift observed: {(_captureSnapshotCount > 0 ? _captureAvgDriftSumMs / _captureSnapshotCount : 0):F1}ms");
+            sb.AppendLine($"Capture max callback interval: {_captureMaxCallbackIntervalMs:F1}ms");
+            sb.AppendLine($"Snapshot samples: {_captureSnapshotCount}");
             sb.AppendLine($"Entries: {_captureBuffer.Count}");
             sb.AppendLine(new string('=', 60));
             sb.AppendLine();
@@ -532,7 +544,42 @@ public partial class MainViewModel : ObservableObject
                 device.WaveformSamples = state.WaveformSamples;
                 device.Status = Math.Abs(state.DriftMs) < 3 ? "Locked" : "Correcting";
             }
+
+            CaptureSnapshotTelemetry(snapshot);
         });
+    }
+
+    private void CaptureSnapshotTelemetry(SyncSnapshot snapshot)
+    {
+        if (!IsCapturing)
+        {
+            return;
+        }
+
+        _captureSnapshotCount++;
+        _captureMaxDriftMs = Math.Max(_captureMaxDriftMs, snapshot.MaxDriftMs);
+        _captureAvgDriftSumMs += snapshot.AvgDriftMs;
+        _captureMaxCallbackIntervalMs = Math.Max(_captureMaxCallbackIntervalMs, snapshot.CaptureCallbackIntervalMs);
+
+        AddLogEntry(new SyncLogEntry
+        {
+            Timestamp = snapshot.Timestamp,
+            Level = snapshot.MaxDriftMs >= 25 ? Models.LogLevel.Warning : Models.LogLevel.Info,
+            Category = LogCategory.Sync,
+            Message = $"SNAPSHOT health={snapshot.SyncHealthPercent}% maxDrift={snapshot.MaxDriftMs:F1}ms avgDrift={snapshot.AvgDriftMs:F1}ms callbackInterval={snapshot.CaptureCallbackIntervalMs:F1}ms callbacks={snapshot.TotalCaptureCallbacks} captured={snapshot.TotalBytesCaptured / (1024.0 * 1024.0):F2}MB"
+        });
+
+        foreach (var state in snapshot.Devices)
+        {
+            AddLogEntry(new SyncLogEntry
+            {
+                Timestamp = snapshot.Timestamp,
+                Level = Math.Abs(state.DriftMs) >= 25 ? Models.LogLevel.Warning : Models.LogLevel.Info,
+                Category = LogCategory.Drift,
+                DeviceName = state.DeviceName,
+                Message = $"DEVICE drift={state.DriftMs:F1}ms bufferOffset={state.BufferOffsetMs:F1}ms buffered={state.BufferedMilliseconds}ms effectiveDelay={state.EffectiveDelayMs:F1}ms estimatedLatency={state.EstimatedLatencyMs:F1}ms manualDelay={state.ManualDelayMs:F1}ms trimmed={state.TotalTrimmedBytes}B padded={state.TotalSilenceBytes}B overflows={state.TotalOverflows}"
+            });
+        }
     }
 
     private void OnLogEmitted(object? sender, SyncLogEntry entry)

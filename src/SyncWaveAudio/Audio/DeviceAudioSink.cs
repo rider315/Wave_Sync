@@ -19,6 +19,7 @@ public sealed class DeviceAudioSink : IDisposable
     private double _lastEndpointVolume = -1;
     private double _smoothedTargetDelayMs;
     private double _maxChunkMs = 10.0;
+    private double _bufferOffsetMs;
     private bool _disposed;
     private bool _debugLogging;
 
@@ -76,7 +77,7 @@ public sealed class DeviceAudioSink : IDisposable
     /// </summary>
     private double TargetMs(int baseBufferMs)
     {
-        var safeMinimum = (_maxChunkMs * 1.2) + _outputLatencyMs;
+        var safeMinimum = (_maxChunkMs * 1.5) + _outputLatencyMs;
         var target = Math.Max(baseBufferMs, safeMinimum);
         return target + EffectiveDelayMs;
     }
@@ -119,27 +120,29 @@ public sealed class DeviceAudioSink : IDisposable
             var sampleGain = (float)Math.Max(1.0, _deviceInfo.Volume);
             var processed = AudioSampleProcessor.Apply(source, count, _format, sampleGain, _deviceInfo.Mono);
 
-            var chunkMs = BytesToMilliseconds(count);
+            var chunkMs = BytesToMilliseconds(processed.Length);
             if (chunkMs > _maxChunkMs) _maxChunkMs = chunkMs;
             else _maxChunkMs = Math.Max(10.0, _maxChunkMs * 0.999); // Slow decay
 
+            var target = TargetMs(baseBufferMs);
             var capacityMs = _buffer.BufferDuration.TotalMilliseconds;
-            if (BufferedMilliseconds + BytesToMilliseconds(count) > capacityMs)
+            if (BufferedMilliseconds + chunkMs > capacityMs)
             {
                 _totalOverflows++;
+                var trimBytes = MillisecondsToBytes(BufferedMilliseconds + chunkMs - target);
+                TrimBufferedAudio(trimBytes);
                 EmitLog(LogCategory.Buffer, $"OVERFLOW #{_totalOverflows} — buf={BufferedMilliseconds}ms + {BytesToMilliseconds(count):F0}ms > {capacityMs:F0}ms", _deviceInfo.FriendlyName, Models.LogLevel.Warning);
             }
 
             _buffer.AddSamples(processed, 0, processed.Length);
             CaptureWaveform(processed);
 
-            var target = TargetMs(baseBufferMs);
-            CorrectDrift(target);
+            GuardReservoir(target);
 
             // Periodic stats to UI (every 50 enqueues = ~500ms)
             if (_totalEnqueues % 50 == 0)
             {
-                EmitLog(LogCategory.Drift, $"#{_totalEnqueues} buf={BufferedMilliseconds}ms target={target:F0}ms drift={DriftMs:F1}ms trim={_totalTrimmedBytes}B pad={_totalSilenceBytes}B", _deviceInfo.FriendlyName);
+                EmitLog(LogCategory.Drift, $"#{_totalEnqueues} buf={BufferedMilliseconds}ms target={target:F0}ms offset={_bufferOffsetMs:F1}ms guardDrift={DriftMs:F1}ms trim={_totalTrimmedBytes}B pad={_totalSilenceBytes}B", _deviceInfo.FriendlyName);
             }
         }
     }
@@ -159,7 +162,7 @@ public sealed class DeviceAudioSink : IDisposable
             _deviceInfo.Id, _deviceInfo.FriendlyName, _deviceInfo.EstimatedLatencyMs, _deviceInfo.ManualDelayMs,
             EffectiveDelayMs, DriftMs, BufferedMilliseconds, _deviceInfo.Status,
             GetWaveformSnapshot(),
-            _totalTrimmedBytes, _totalSilenceBytes, _totalOverflows);
+            _totalTrimmedBytes, _totalSilenceBytes, _totalOverflows, _bufferOffsetMs);
     }
 
     private void CaptureWaveform(byte[] processed)
@@ -185,48 +188,113 @@ public sealed class DeviceAudioSink : IDisposable
         return snap;
     }
 
-    private void CorrectDrift(double targetMs)
+    /// <summary>
+    /// Maximum ms to trim or pad in a single callback to avoid audible artifacts.
+    /// At 48kHz stereo float, 5ms = ~1920 bytes — imperceptible.
+    /// </summary>
+    private const double MaxCorrectionPerCallbackMs = 5.0;
+
+    /// <summary>
+    /// Minimum dead-zone floor in ms. The actual dead-zone is dynamic
+    /// based on _maxChunkMs to absorb natural WASAPI buffer oscillation.
+    /// </summary>
+    private const double MinDeadZoneMs = 15.0;
+
+    /// <summary>
+    /// Emergency threshold: if buffer deviation exceeds this, allow larger corrections.
+    /// </summary>
+    private const double EmergencyThresholdMs = 100.0;
+
+    private void GuardReservoir(double targetMs)
     {
         var bufferedMs = _buffer.BufferedDuration.TotalMilliseconds;
-        DriftMs = Math.Round(bufferedMs - targetMs, 2);
+        _bufferOffsetMs = Math.Round(bufferedMs - targetMs, 2);
 
-        var absDrift = Math.Abs(DriftMs);
+        // Measurement bias correction: GuardReservoir is called right after Enqueue
+        // adds a full chunk (~60ms at typical WASAPI callback intervals). The buffer
+        // is therefore systematically elevated by ~chunkMs/2 above the true average.
+        // Subtract this bias so the dead-zone is centered on the expected post-enqueue level.
+        var biasMs = _maxChunkMs * 0.5;
+        var deviationMs = bufferedMs - (targetMs + biasMs);
 
-        // Dead zone: ±5ms — well below human auditory threshold (~10ms)
-        // This prevents constant TRIM/PAD oscillation with chunky BT delivery
-        if (DriftMs > 5.0)
+        // Dynamic dead-zone: only needs to absorb callback interval jitter (±10ms)
+        // and output drain timing variation, not the systematic chunk bias (handled above).
+        var deadZoneMs = Math.Max(MinDeadZoneMs, _maxChunkMs * 0.35);
+
+        // Dead-zone: buffer is within normal oscillation range — no correction needed
+        if (Math.Abs(deviationMs) <= deadZoneMs)
         {
-            // Ahead of target — trim excess (50% of overshoot, max 12ms)
-            var trimMs = Math.Min(12, absDrift * 0.5);
-            var trimBytes = MillisecondsToBytes(trimMs);
-            if (trimBytes > 0)
-            {
-                var scratch = new byte[trimBytes];
-                _buffer.Read(scratch, 0, scratch.Length);
-                _totalTrimmedBytes += trimBytes;
-                _consecutiveDriftCorrections++;
-                if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
-                    EmitLog(LogCategory.Drift, $"TRIM {trimMs:F1}ms drift={DriftMs:F1}ms buf={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
-            }
+            DriftMs = 0;
+            if (_consecutiveDriftCorrections > 0)
+                EmitLog(LogCategory.Drift, $"LOCKED - buffer stable after {_consecutiveDriftCorrections} corrections", _deviceInfo.FriendlyName);
+            _consecutiveDriftCorrections = 0;
+            return;
         }
-        else if (DriftMs < -5.0)
+
+        // Only correct the excess beyond the dead-zone edge
+        if (deviationMs > 0)
         {
-            // Behind target — inject silence (40% of deficit, max 8ms)
-            var padMs = Math.Min(8, absDrift * 0.4);
-            var padBytes = MillisecondsToBytes(padMs);
-            AddSilence(padBytes);
-            _totalSilenceBytes += padBytes;
+            var excessMs = deviationMs - deadZoneMs;
+            var maxTrim = MaxCorrectionPerCallbackMs;
+            if (excessMs > EmergencyThresholdMs)
+            {
+                maxTrim = Math.Min(15.0, excessMs * 0.20);
+                if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
+                    EmitLog(LogCategory.Drift, $"HIGH BUFFER TRIM {maxTrim:F1}ms buf={bufferedMs:F1}ms expected={targetMs + biasMs:F1}ms excess={excessMs:F1}ms", _deviceInfo.FriendlyName, Models.LogLevel.Warning);
+            }
+
+            var trimMs = Math.Min(maxTrim, excessMs * 0.15);
+            trimMs = Math.Max(1.0, trimMs);
+            var trimBytes = MillisecondsToBytes(trimMs);
+            TrimBufferedAudio(trimBytes);
+
+            DriftMs = Math.Round(excessMs, 2);
             _consecutiveDriftCorrections++;
-            if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
-                EmitLog(LogCategory.Drift, $"PAD {padMs:F1}ms drift={DriftMs:F1}ms buf={BufferedMilliseconds}ms", _deviceInfo.FriendlyName);
         }
         else
         {
-            // Within ±5ms — locked and stable
-            if (_consecutiveDriftCorrections > 0)
-                EmitLog(LogCategory.Drift, $"LOCKED — drift={DriftMs:F1}ms after {_consecutiveDriftCorrections} corrections", _deviceInfo.FriendlyName);
-            _consecutiveDriftCorrections = 0;
+            var shortfallMs = -deviationMs - deadZoneMs;
+            if (shortfallMs <= 0)
+            {
+                DriftMs = 0;
+                return;
+            }
+
+            var maxPad = MaxCorrectionPerCallbackMs;
+            if (shortfallMs > EmergencyThresholdMs)
+            {
+                maxPad = Math.Min(15.0, shortfallMs * 0.20);
+                if (_consecutiveDriftCorrections <= 3 || _consecutiveDriftCorrections % 50 == 0)
+                    EmitLog(LogCategory.Drift, $"LOW BUFFER PAD {maxPad:F1}ms buf={bufferedMs:F1}ms expected={targetMs + biasMs:F1}ms shortfall={shortfallMs:F1}ms", _deviceInfo.FriendlyName, Models.LogLevel.Warning);
+            }
+
+            var padMs = Math.Min(maxPad, shortfallMs * 0.15);
+            padMs = Math.Max(1.0, padMs);
+            var padBytes = MillisecondsToBytes(padMs);
+            AddSilence(padBytes);
+            _totalSilenceBytes += padBytes;
+
+            DriftMs = Math.Round(-shortfallMs, 2);
+            _consecutiveDriftCorrections++;
         }
+    }
+
+    private void TrimBufferedAudio(int bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        var alignedBytes = bytes - bytes % _format.BlockAlign;
+        if (alignedBytes <= 0)
+        {
+            return;
+        }
+
+        var scratch = new byte[alignedBytes];
+        var read = _buffer.Read(scratch, 0, scratch.Length);
+        _totalTrimmedBytes += read;
     }
 
     private void AddSilence(int bytes)

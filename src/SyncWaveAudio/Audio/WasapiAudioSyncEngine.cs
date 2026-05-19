@@ -105,6 +105,12 @@ public sealed class WasapiAudioSyncEngine(
             _sinks.Add(sink);
             device.Status = effectiveDelay > 0 ? "Anchor aligned" : "Monitoring";
 
+            var adjustedAnchorLatency = Math.Max(0, _anchorLatencyMs - _captureDevicePeriodMs);
+            if (effectiveDelay <= 0 && device.EstimatedLatencyMs > adjustedAnchorLatency)
+            {
+                EmitLog(LogCategory.Sync, $"Relay may be late vs direct anchor - relayLatency={device.EstimatedLatencyMs:F1}ms, anchorLatency={adjustedAnchorLatency:F1}ms. Set the slower device as Windows default or add manual delay to faster relay devices.", Models.LogLevel.Warning, device.FriendlyName);
+            }
+
             logger.LogInformation("Relay device: {Device} — estimatedLatency={LatencyMs:F1}ms, effectiveDelay={DelayMs:F1}ms, manualDelay={ManualMs:F1}ms",
                 device.FriendlyName, device.EstimatedLatencyMs, effectiveDelay, device.ManualDelayMs);
             EmitLog(LogCategory.Device, $"Relay: {device.FriendlyName} — latency={device.EstimatedLatencyMs:F1}ms, delay={effectiveDelay:F1}ms", deviceName: device.FriendlyName);
